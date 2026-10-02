@@ -1,0 +1,7 @@
+Manifest-Version: 1.0
+Main-Class: dev.speedycpu.agent.AgentMain
+Enable-Native-Access: ALL-UNNAMED
+Implementation-Title: SpeedyCPU agent
+Implementation-Version: 0.1.0
+Implementation-Vendor: SpeedyCPU contributors
+

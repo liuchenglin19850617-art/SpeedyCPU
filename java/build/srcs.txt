@@ -1,0 +1,6 @@
+src/main/java/dev/speedycpu/agent/AgentMain.java
+src/main/java/dev/speedycpu/agent/Booster.java
+src/main/java/dev/speedycpu/agent/Json.java
+src/main/java/dev/speedycpu/agent/TurboKeeper.java
+src/main/java/dev/speedycpu/agent/Win32.java
+src/main/java/dev/speedycpu/agent/Workspace.java

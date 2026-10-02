@@ -1,0 +1,2 @@
+explorer.exe (pid 5616): priority high -> high, 125/145 threads
+boosted 1 process(es)
