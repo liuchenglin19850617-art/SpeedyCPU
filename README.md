@@ -7,7 +7,7 @@
 `s-cpu on` applies boosting. `s-cpu off` restores every value that was changed.
 
 [![CI](https://github.com/speedycpu/speedycpu/actions/workflows/ci.yml/badge.svg)](https://github.com/speedycpu/speedycpu/actions/workflows/ci.yml)
-[![License: LGPL-2.0-or-later](https://img.shields.io/badge/license-LGPL--2.0--or--later-blue.svg)](LICENSE)
+[![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#platform-support)
 
@@ -54,6 +54,31 @@ a placebo or an increase in resource consumption. The present project states in
 Every value listed above is recorded before it is modified, and is restored by
 `s-cpu off`, by the exit of the background worker, and by uninstallation. No
 registry entry and no system directory is written.
+
+### Smart mode
+
+`s-cpu on --mode smart` (or `config set mode smart`) goes beyond the focused
+window. It tiers every process into three states:
+
+- **active** - the focused window, any `targets` pattern, and any program that
+  *just launched* (for `launch_boost_seconds`). Active processes are boosted as
+  described above and, when `keep_active_ram` is on, their working set is pinned
+  in RAM so they do not have to fault pages back in.
+- **launch** - a transient state: a freshly started program is treated like an
+  active one for a few seconds so it can grab CPU, memory and (via Windows' own
+  foreground GPU scheduling) GPU to start up, regardless of whether it is yet the
+  focused window.
+- **idle** - everything else. Idle processes are *lowered* in scheduler priority
+  (`idle_priority`) and their memory priority is deprioritised
+  (`idle_memory_priority`); under memory pressure the manager pages them to the
+  page file before active programs. This is the "unused programs render less and
+  live on external storage" behaviour, done safely: SpeedyCPU lowers memory
+  priority rather than force-flushing working sets, so an active program never
+  has to race disk I/O.
+
+Smart mode uses the Python worker for the scanning and throttling loop; the
+native and Java engines are not engaged. All changes remain recorded and are
+reverted by `s-cpu off`.
 
 ## Repository layout
 
@@ -212,7 +237,7 @@ alter behaviour most:
 | Key | Default | Meaning |
 |---|---|---|
 | `engine` | `auto` | `auto` \| `native` \| `java` \| `python` |
-| `mode` | `foreground` | `foreground` (focused window only) \| `all` (every user process) |
+| `mode` | `foreground` | `foreground` (focused window only) \| `all` (every user process) \| `smart` (active/idle tiers) |
 | `targets` | `[]` | Process patterns to boost unconditionally, for example `["chrome.exe", "game*.exe"]` |
 | `exclude` | 47 entries | Never touched. Enumerated by `s-cpu targets list` |
 | `priority` | `high` | `high` \| `above_normal` |
@@ -223,6 +248,10 @@ alter behaviour most:
 | `global_power_throttling_off` | `false` | Disable machine-wide EcoQoS (requires administrator rights) |
 | `poll_interval` | `3.0` | Interval between full process scans, in seconds |
 | `turbo_threads` | `0` | Java engine only. Described below |
+| `idle_priority` | `below_normal` | `smart` mode only: priority class idle processes are dropped to (`below_normal` \| `idle`) |
+| `idle_memory_priority` | `true` | `smart` mode only: deprioritise idle memory so the manager pages it out first |
+| `keep_active_ram` | `true` | `smart` mode only: pin the working set of active processes in RAM |
+| `launch_boost_seconds` | `8.0` | `smart` mode only: seconds a freshly launched program is boosted regardless of focus |
 
 `mode = all` is implemented, but is in most cases a regression: raising every
 process to `High` preserves the ratios between them. `foreground` is the default
@@ -374,7 +403,7 @@ Linux, together with a C++ build under MSVC and a Java build on JDK 22 and 25.
 ## License
 
 SpeedyCPU is free software distributed under the
-[GNU Lesser General Public License v2.0 or later](LICENSE). The full GPL-2.0 text
-on which the LGPL is based is provided in [COPYING](COPYING).
+[GNU General Public License v2.0](LICENSE). The full GPL-2.0 text ships in both
+`LICENSE` and `COPYING`.
 
 Copyright (C) 2026 SpeedyCPU contributors.

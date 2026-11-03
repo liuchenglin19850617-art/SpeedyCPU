@@ -85,5 +85,5 @@ UNINSTALLING
      s-cpu off
      then delete this folder and %LOCALAPPDATA%\SpeedyCPU
 
-Licence: LGPL-2.0-or-later. See LICENSE and COPYING.
+Licence: GPL-2.0-or-later. See LICENSE and COPYING.
 Source:  https://github.com/speedycpu/speedycpu

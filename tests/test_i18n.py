@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 
 """The i18n layer, including the "catalogs must not drift" invariant."""

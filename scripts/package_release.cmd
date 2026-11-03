@@ -1,5 +1,5 @@
 @echo off
-rem SPDX-License-Identifier: LGPL-2.0-or-later
+rem SPDX-License-Identifier: GPL-2.0-or-later
 rem
 rem Launcher for package_release.ps1.
 rem

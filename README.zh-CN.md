@@ -8,7 +8,7 @@
 一条命令开启，一条命令还原。
 
 [![CI](https://github.com/speedycpu/speedycpu/actions/workflows/ci.yml/badge.svg)](https://github.com/speedycpu/speedycpu/actions/workflows/ci.yml)
-[![License: LGPL-2.0-or-later](https://img.shields.io/badge/license-LGPL--2.0--or--later-blue.svg)](LICENSE)
+[![License: GPL-2.0](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 
 [English](README.md) · [实现原理](docs/HOW-IT-WORKS.md) · [更新日志](CHANGELOG.md)
@@ -322,7 +322,6 @@ CI 会在 Windows 与 Linux 上跑这两项，另外还有 MSVC 的 C++ 构建�
 ## 许可证
 
 SpeedyCPU 是自由软件，采用
-[GNU 宽通用公共许可证 v2.0 或更新版本](LICENSE)。LGPL 所基于的 GPL-2.0 全文见
-[COPYING](COPYING)。
+[GNU 通用公共许可证 v2.0](LICENSE)。GPL-2.0 全文见 `LICENSE` 与 `COPYING`。
 
 版权所有 (C) 2026 SpeedyCPU contributors。

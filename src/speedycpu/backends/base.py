@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """Platform backend interface shared by Windows / Linux / macOS.
@@ -81,6 +81,13 @@ class BoostRecord:
     affinity_before: int | None = None
     affinity_cores_added: int = 0
     hard_working_set: bool = False
+    #: True when this record represents an *idle* (throttled) process rather
+    #: than a boosted one. The worker keeps idle records in a separate map and
+    #: the same :meth:`Backend.unboost` path restores both.
+    idle_throttled: bool = False
+    #: True when SpeedyCPU lowered the process' memory priority (so the memory
+    #: manager pages it out before active processes). Restored on unboost.
+    memory_priority_lowered: bool = False
     boosted_at: str = ""
     manual: bool = False
     #: Why this process was picked: ``"foreground"`` (it owns the focused
@@ -232,6 +239,22 @@ class Backend(ABC):
     def unboost(self, record: BoostRecord) -> bool:
         """Restore the state recorded in *record*."""
 
+    def throttle(self, process: ProcessInfo, manual: bool = False) -> BoostRecord | None:
+        """Deprioritise an idle process. Default: unsupported (returns None).
+
+        Windows overrides this with a real implementation. Platforms without a
+        working throttle simply skip idle management, which is safe: the
+        smart-mode worker treats a ``None`` return as "nothing to do".
+        """
+        return None
+
+    def reapply_throttle(self, record: BoostRecord) -> bool:
+        """Re-apply a throttle without overwriting its recorded "before" values.
+
+        Default: a no-op. Overridden where throttling is supported.
+        """
+        return False
+
     # -- helpers -----------------------------------------------------------
     def targets(self) -> list[str]:
         return list(self.config.get("targets") or [])
@@ -250,7 +273,13 @@ class Backend(ABC):
         return None
 
     def match_reason(self, process: ProcessInfo) -> str | None:
-        """Return why *process* should be boosted, or None to leave it alone."""
+        """Return why *process* should be boosted, or None to leave it alone.
+
+        In ``smart`` mode a process that is not the focused window and does not
+        match a target pattern is returned as ``"idle"``: the worker throttles
+        it instead of boosting it. The caller (the worker) promotes a freshly
+        launched process out of ``idle`` for a short launch window.
+        """
         name = process.name
         if not name or is_protected(name):
             return None
@@ -259,11 +288,16 @@ class Backend(ABC):
         targets = [pattern for pattern in self.targets() if str(pattern).strip() not in {"", "*"}]
         if matches_any(name, targets):
             return "pattern"
-        if self.mode() == "foreground":
+        mode = self.mode()
+        if mode == "foreground":
             # Only the focused window gets the boost, so the program the user
             # is actually looking at wins the CPU against everything else.
             # Boosting every process instead would leave the ratios unchanged.
             return "foreground" if process.pid == self.foreground_pid() else None
+        if mode == "smart":
+            # The focused window is active; everything else that survived the
+            # exclusion gate is idle and gets throttled by the worker.
+            return "foreground" if process.pid == self.foreground_pid() else "idle"
         if "*" in [str(pattern).strip() for pattern in self.targets()] or not self.targets():
             return "all"
         return None
@@ -276,6 +310,11 @@ class Backend(ABC):
         patterns = [str(item).strip() for item in self.targets() if str(item).strip() and str(item).strip() != "*"]
         if self.mode() == "foreground":
             base = "foreground window"
+            if patterns:
+                return f"{base} + {', '.join(patterns)}"
+            return base
+        if self.mode() == "smart":
+            base = "smart"
             if patterns:
                 return f"{base} + {', '.join(patterns)}"
             return base

@@ -1,5 +1,5 @@
 @echo off
-rem SPDX-License-Identifier: LGPL-2.0-or-later
+rem SPDX-License-Identifier: GPL-2.0-or-later
 rem
 rem The `s-cpu` command for a portable install: drop this file next to
 rem SpeedyCPU.exe and put the folder on PATH, and `s-cpu on` works from any

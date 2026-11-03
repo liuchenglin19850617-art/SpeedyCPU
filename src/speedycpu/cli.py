@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """The ``s-cpu`` command line interface.
@@ -115,6 +115,10 @@ def _scope_text(backend) -> str:
         return t("scope.foreground") + scope[len(prefix) :]
     if scope == "all user processes":
         return t("scope.all")
+    if scope == "smart":
+        return t("scope.smart")
+    if scope.startswith("smart + "):
+        return t("scope.smart") + scope[len("smart"):]
     return scope
 
 
@@ -235,6 +239,13 @@ def cmd_on(args: argparse.Namespace, console: Console) -> int:
     # A previous session may have died without reverting. Clean that up first so
     # boosts cannot pile up session after session.
     _recover_previous_session(backend, console, args.dry_run)
+
+    # smart mode needs the Python worker loop to do the per-process scanning and
+    # idle throttling; the native and Java engines only handle focus + timer.
+    if str(config.get("mode") or "foreground").lower() == "smart":
+        config["engine"] = "python"
+        if not args.dry_run:
+            cfgmod.save_config(config)
 
     engine = engines.resolve_engine(str(config.get("engine") or "auto"))
     console.info(t("on.engine", engine=engine.name, note=_engine_note(engine)))
@@ -413,7 +424,9 @@ def cmd_status(args: argparse.Namespace, console: Console) -> int:
     state = cfgmod.load_state()
     engine_name = str(state.get("engine") or "") or None
     # Records may live in either engine's file; merge so the listing is complete.
-    records = {record.pid: record for record in read_engine_leftovers(engine_name, state)}
+    all_records = {record.pid: record for record in read_engine_leftovers(engine_name, state)}
+    records = {pid: r for pid, r in all_records.items() if not r.idle_throttled}
+    idle_records = {pid: r for pid, r in all_records.items() if r.idle_throttled}
 
     worker_pid = state.get("worker_pid")
     worker_alive = bool(worker_pid and backend.is_alive(int(worker_pid)))
@@ -474,6 +487,8 @@ def cmd_status(args: argparse.Namespace, console: Console) -> int:
         rows.append((t("status.worker"), t("common.none")))
 
     rows.append((t("status.mode"), _scope_text(backend)))
+    rows.append((t("status.boosted"), f"{len(records)}"))
+    rows.append((t("status.idle"), f"{len(idle_records)}"))
     targets = config.get("targets") or []
     rows.append((t("status.targets"), ", ".join(str(item) for item in targets) or t("common.none")))
     rows.append((t("status.admin"), t("common.yes") if backend.is_elevated() else t("common.no")))
@@ -509,6 +524,21 @@ def cmd_status(args: argparse.Namespace, console: Console) -> int:
             )
         if len(records) > args.limit:
             console.debug(f"... and {len(records) - args.limit} more")
+
+    console.write()
+    console.info(f"{t('status.idle')} ({len(idle_records)})")
+    if not idle_records:
+        console.debug(t("status.no_boosted"))
+    else:
+        for record in sorted(idle_records.values(), key=lambda item: item.name.lower())[: args.limit]:
+            console.write(
+                "    "
+                + console.paint(record.name, "dim")
+                + f" (pid {record.pid}) - priority {record.priority_after or '?'} @ "
+                + console.paint("idle", "yellow")
+            )
+        if len(idle_records) > args.limit:
+            console.debug(f"... and {len(idle_records) - args.limit} more")
     return EXIT_OK
 
 
@@ -806,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     on = sub.add_parser("on", help="enable SpeedyCPU (开启加速)")
     on.add_argument("--targets", metavar="A,B", help="comma separated process patterns to boost")
-    on.add_argument("--mode", choices=["all", "foreground"], help="boost everything, or only the focused window")
+    on.add_argument("--mode", choices=["all", "foreground", "smart"], help="boost everything, only the focused window, or tier active/idle (smart)")
     on.add_argument("--priority", choices=["above_normal", "high"], help="target priority class")
     on.add_argument("--power-plan", metavar="SPEC", help="high_performance | ultimate | balanced | <GUID> | none")
     on.add_argument("--no-power-plan", action="store_true", help="leave the active power plan alone")

@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """Windows backend.
@@ -46,6 +46,7 @@ import locale
 import os
 import re
 import subprocess
+import tempfile
 
 from .. import __version__
 from ..config import utc_timestamp
@@ -101,10 +102,30 @@ _PLAN_LINE_RE = re.compile(
 POWER_THROTTLING_KEY = r"SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"
 POWER_THROTTLING_VALUE = "PowerThrottlingOff"
 
+#: ``powercfg`` is normally a sub-second call, but on some machines a query can
+#: block indefinitely (e.g. the power service is busy, or a specific setting
+#: GUID is not exposed). Bounding it keeps ``s-cpu on`` from freezing the whole
+#: process; a timeout is reported as "not available" so the caller degrades
+#: gracefully instead of hanging forever.
+POWERCFG_TIMEOUT = 10.0
+
 #: Processes whose priority we never lower, only report.
 _KEEP_AT_LEAST = {
     winapi.REALTIME_PRIORITY_CLASS: "realtime",
     winapi.HIGH_PRIORITY_CLASS: "high",
+}
+
+#: Semantic ordering of priority classes, because the numeric Win32 values are
+#: not monotonically ordered (``BELOW_NORMAL`` is 0x4000, larger than
+#: ``NORMAL``'s 0x20). Used to decide whether a throttle should actually lower
+#: a process or leave it where it is.
+_PRIORITY_RANK = {
+    winapi.IDLE_PRIORITY_CLASS: 0,
+    winapi.BELOW_NORMAL_PRIORITY_CLASS: 1,
+    winapi.NORMAL_PRIORITY_CLASS: 2,
+    winapi.ABOVE_NORMAL_PRIORITY_CLASS: 3,
+    winapi.HIGH_PRIORITY_CLASS: 4,
+    winapi.REALTIME_PRIORITY_CLASS: 5,
 }
 
 
@@ -206,16 +227,32 @@ class WindowsBackend(Backend):
     # ------------------------------------------------------------------
     @staticmethod
     def _powercfg(*args: str) -> tuple[int, str]:
+        # ``powercfg`` occasionally blocks on some machines (busy power service,
+        # or a setting GUID this build does not expose). A plain
+        # ``capture_output=True`` + ``timeout`` does not actually bound that:
+        # when the timeout fires Python kills powercfg but then blocks draining
+        # the stdout pipe, which a surviving grandchild keeps open. Writing the
+        # output to temp files instead means the timeout kill is honoured and a
+        # hung powercfg can never freeze ``s-cpu on``.
         try:
-            completed = subprocess.run(
-                ["powercfg", *args],
-                capture_output=True,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                completed = subprocess.run(
+                    ["powercfg", *args],
+                    stdout=out,
+                    stderr=err,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    timeout=POWERCFG_TIMEOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                out.seek(0)
+                err.seek(0)
+                raw = out.read() + err.read()
         except (OSError, ValueError) as exc:  # pragma: no cover - powercfg missing
             return 1, str(exc)
-        return completed.returncode, _decode(completed.stdout) + _decode(completed.stderr)
+        except subprocess.TimeoutExpired:  # pragma: no cover - powercfg hung
+            return 1, f"powercfg timed out after {POWERCFG_TIMEOUT:.0f}s: {' '.join(args)}"
+        return completed.returncode, _decode(raw)
 
     def list_power_plans(self) -> list[tuple[str, str]]:
         code, output = self._powercfg("/list")
@@ -421,7 +458,57 @@ class WindowsBackend(Backend):
     # ------------------------------------------------------------------
     # system wide changes
     # ------------------------------------------------------------------
+    def _plan_system(self) -> list[SystemChange]:
+        """Describe what :meth:`apply_system` *would* do, without touching the
+        machine.
+
+        A dry run must be side-effect free. Querying live settings means
+        spawning ``powercfg``, which on some machines can block for a long time
+        (and is pointless when nothing is going to change), so the plan is
+        derived from the configuration alone.
+        """
+        changes: list[SystemChange] = []
+
+        spec = str(self.config.get("power_plan") or "none")
+        plan_change = SystemChange(key="power_plan", description="")
+        if spec.lower() in {"none", "off", "false", ""}:
+            plan_change.skipped = True
+            plan_change.description = t("on.power_plan.skipped")
+        else:
+            plan_change.applied = True
+            plan_change.current = spec
+            plan_change.description = t("on.power_plan", old=t("common.unknown"), new=spec)
+        changes.append(plan_change)
+
+        cpu_change = SystemChange(key="cpu_tuning", description="")
+        if not self.config.get("cpu_tuning"):
+            cpu_change.skipped = True
+            cpu_change.description = t("on.cpu_tuning.skipped")
+        else:
+            wanted = {name: entry[1] for name, entry in CPU_SETTINGS.items()}
+            cpu_change.applied = True
+            cpu_change.current = wanted
+            cpu_change.description = t(
+                "on.cpu_tuning",
+                minimum=CPU_SETTINGS["procthrottlemin"][1],
+                boost=CPU_SETTINGS["perfboostmode"][1],
+            )
+        changes.append(cpu_change)
+
+        if self.config.get("global_power_throttling_off"):
+            changes.append(
+                SystemChange(key="global_throttling", description=t("on.throttling"), applied=True, current=1)
+            )
+        else:
+            changes.append(
+                SystemChange(key="global_throttling", description=t("on.throttling.skipped"), skipped=True)
+            )
+        return changes
+
     def apply_system(self) -> list[SystemChange]:
+        if self.dry_run:
+            return self._plan_system()
+
         changes: list[SystemChange] = []
 
         spec = str(self.config.get("power_plan") or "none")
@@ -612,8 +699,13 @@ class WindowsBackend(Backend):
                     record.affinity_before = process_mask
                     record.affinity_cores_added = winapi.popcount(system_mask) - winapi.popcount(process_mask)
 
-        # 5) optional: keep the working set resident across alt-tabs.
-        if self.config.get("aggressive"):
+        # 5) optional: keep the working set resident across alt-tabs. In
+        #    smart mode active processes are pinned whenever keep_active_ram is
+        #    on, which is the "used programs use all the memory" half.
+        pin_active = bool(self.config.get("aggressive")) or (
+            self.mode() == "smart" and bool(self.config.get("keep_active_ram"))
+        )
+        if pin_active:
             size = winapi.working_set_size(pid)
             if size:
                 record.hard_working_set = winapi.set_hard_working_set(
@@ -643,6 +735,11 @@ class WindowsBackend(Backend):
             # Hand the process back to Windows' own judgement.
             touched |= winapi.set_process_ecoqos(pid, disable=False)
 
+        if record.memory_priority_lowered:
+            # Restore the memory priority Windows would have assigned, so the
+            # process is no longer the first to be paged out under pressure.
+            touched |= winapi.set_memory_priority(pid, winapi.MEMORY_PRIORITY_NORMAL)
+
         if record.affinity_before:
             touched |= winapi.set_affinity(pid, int(record.affinity_before))
 
@@ -650,3 +747,92 @@ class WindowsBackend(Backend):
             touched |= winapi.clear_hard_working_set(pid)
 
         return bool(touched)
+
+    # ------------------------------------------------------------------
+    # idle throttling (smart mode)
+    # ------------------------------------------------------------------
+    def _idle_priority(self) -> tuple[int, int]:
+        """Resolve ``idle_priority`` into a (class, thread) priority pair."""
+        wanted = str(self.config.get("idle_priority") or "below_normal").lower()
+        if wanted in {"idle", "lowest"}:
+            return winapi.IDLE_PRIORITY_CLASS, winapi.THREAD_PRIORITY_IDLE
+        return winapi.BELOW_NORMAL_PRIORITY_CLASS, winapi.THREAD_PRIORITY_BELOW_NORMAL
+
+    @staticmethod
+    def _rank(priority_class: int) -> int:
+        return _PRIORITY_RANK.get(int(priority_class), -1)
+
+    def throttle(self, process: ProcessInfo) -> BoostRecord | None:
+        """Deprioritise an idle process: lower its scheduler weight and memory
+        priority so it renders/competes less and is paged out before active apps.
+
+        This is the inverse of :meth:`boost` and uses the same record so the
+        single :meth:`unboost` path restores everything.
+        """
+        pid = process.pid
+        if pid <= 0:
+            return None
+        current_class = winapi.get_priority_class(pid)
+        if current_class is None:
+            return None
+
+        class_target, thread_target = self._idle_priority()
+        record = BoostRecord(
+            pid=pid,
+            name=process.name,
+            exe=process.exe,
+            priority_before=winapi.PRIORITY_CLASS_NAMES.get(current_class, str(current_class)),
+            boosted_at=utc_timestamp(),
+            idle_throttled=True,
+        )
+
+        if self.dry_run:
+            record.priority_after = winapi.PRIORITY_CLASS_NAMES.get(class_target, "below_normal")
+            record.threads_total = winapi.thread_count(pid)
+            record.threads_raised = record.threads_total
+            record.memory_priority_lowered = bool(self.config.get("idle_memory_priority"))
+            return record
+
+        # 1) priority class - only lower when currently above the idle target.
+        if self._rank(current_class) > self._rank(class_target):
+            if winapi.set_priority_class(pid, class_target):
+                record.priority_after = winapi.PRIORITY_CLASS_NAMES.get(class_target, "below_normal")
+            else:
+                record.priority_after = winapi.PRIORITY_CLASS_NAMES.get(current_class, "below_normal")
+        else:
+            record.priority_after = winapi.PRIORITY_CLASS_NAMES.get(current_class, "below_normal")
+
+        # 2) every thread down to the idle target, recording what we changed.
+        lowered, total, changes = winapi.lower_threads(pid, thread_target)
+        record.threads_total = total
+        record.threads_raised = lowered
+        record.thread_priorities = [[tid, prio] for tid, prio in changes]
+
+        # 3) memory priority low so the manager pages it out before active apps.
+        if self.config.get("idle_memory_priority"):
+            record.memory_priority_lowered = winapi.set_memory_priority(
+                pid, winapi.MEMORY_PRIORITY_VERY_LOW
+            )
+
+        return record
+
+    def reapply_throttle(self, record: BoostRecord) -> bool:
+        """Re-apply the throttle for *record* without overwriting its stored
+        "before" values, so a later :meth:`unboost` still restores the original.
+
+        Called during maintenance when Windows (or the program itself) may have
+        raised the process back up.
+        """
+        if self.dry_run:
+            return True
+        pid = record.pid
+        if not winapi.is_process_alive(pid):
+            return False
+        class_target, thread_target = self._idle_priority()
+        current = winapi.get_priority_class(pid)
+        if current is not None and self._rank(current) > self._rank(class_target):
+            winapi.set_priority_class(pid, class_target)
+        winapi.lower_threads(pid, thread_target)
+        if record.memory_priority_lowered:
+            winapi.set_memory_priority(pid, winapi.MEMORY_PRIORITY_VERY_LOW)
+        return True

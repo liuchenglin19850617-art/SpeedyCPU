@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # Windows version resource embedded into the frozen exe, so Explorer shows a
@@ -24,7 +24,7 @@ VSVersionInfo(
                         StringStruct('FileDescription', 'SpeedyCPU - command line CPU responsiveness booster'),
                         StringStruct('FileVersion', '0.1.0.0'),
                         StringStruct('InternalName', 'SpeedyCPU'),
-                        StringStruct('LegalCopyright', 'Copyright (C) 2026 SpeedyCPU contributors. LGPL-2.0-or-later.'),
+                        StringStruct('LegalCopyright', 'Copyright (C) 2026 SpeedyCPU contributors. GPL-2.0-or-later.'),
                         StringStruct('OriginalFilename', 'SpeedyCPU.exe'),
                         StringStruct('ProductName', 'SpeedyCPU'),
                         StringStruct('ProductVersion', '0.1.0'),

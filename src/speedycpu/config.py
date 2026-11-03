@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """Configuration and persistent state handling.
@@ -154,9 +154,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # "foreground" is the default on purpose: raising *every* process to high
     # priority leaves their relative shares unchanged, which is why so many
     # "boosters" do nothing measurable. Letting the focused app win does help.
+    # Which processes get boosted.
+    #   "foreground" - only the focused window (plus any patterns in targets)
+    #   "all"        - every process that is not excluded
+    #   "smart"      - tier processes into active (focused window, target
+    #                  patterns and newly launched programs), idle (everything
+    #                  else, throttled + memory deprioritised) and a short
+    #                  launch window where a freshly started program is treated
+    #                  like an active one so it can grab CPU/RAM to start.
+    # "foreground" is the default on purpose; "smart" is the resource-aware mode.
     "mode": "foreground",
     "targets": [],
     "exclude": list(DEFAULT_EXCLUDE),
+    # --- smart mode knobs ------------------------------------------------
+    # Priority class idle processes are dropped to ("below_normal" | "idle").
+    # This is the "unused programs render less" half: a lower scheduler weight
+    # means they win fewer frame/scheduling slices against the focused app.
+    "idle_priority": "below_normal",
+    # Deprioritise the memory of idle processes so the manager pages them to the
+    # page file first under pressure. This is the "unused uses external storage"
+    # half, done safely: we lower the memory priority rather than force-flushing
+    # the working set, so the active app never has to compete with disk I/O.
+    "idle_memory_priority": True,
+    # Pin the working set of active (focused / target / launch) processes so they
+    # stay resident in RAM. This is the "used programs use all the memory" half.
+    "keep_active_ram": True,
+    # Window (seconds) after a program starts where it is boosted like an active
+    # process regardless of focus, so it can call on more CPU/RAM to start up.
+    "launch_boost_seconds": 8.0,
     # How hard we push.
     "priority": "high",  # "above_normal" | "high"
     "raise_threads": True,

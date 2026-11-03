@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(SpeedyCPU-native LANGUAGES CXX)
 
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 
 set(CMAKE_CXX_STANDARD 17)

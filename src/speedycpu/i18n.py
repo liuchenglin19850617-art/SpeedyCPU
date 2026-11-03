@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """Tiny zero-dependency i18n layer.
@@ -62,6 +62,7 @@ CATALOG: dict[str, dict[str, str]] = {
         # ---- scopes -----------------------------------------------------
         "scope.foreground": "focused window",
         "scope.all": "all user processes",
+        "scope.smart": "smart (active + idle tiers)",
         # ---- engines ----------------------------------------------------
         "engine.native.ready": "C++ engine{extras}",
         "engine.native.missing": "not built; build with native/build.bat",
@@ -124,6 +125,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "status.mode": "Target mode",
         "status.targets": "Targets",
         "status.boosted": "Boosted processes",
+        "status.idle": "Throttled (idle) processes",
         "status.power_plan": "Active power plan",
         "status.timer": "System timer resolution",
         "status.timer_held": "{value} ms (requested by SpeedyCPU)",
@@ -197,6 +199,7 @@ CATALOG: dict[str, dict[str, str]] = {
         # ---- scopes -----------------------------------------------------
         "scope.foreground": "当前前台窗口",
         "scope.all": "全部用户进程",
+        "scope.smart": "智能模式（活跃 + 闲置 分级）",
         # ---- engines ----------------------------------------------------
         "engine.native.ready": "C++ 引擎{extras}",
         "engine.native.missing": "未编译；请用 native/build.bat 构建",
@@ -259,6 +262,7 @@ CATALOG: dict[str, dict[str, str]] = {
         "status.mode": "目标模式",
         "status.targets": "加速目标",
         "status.boosted": "已加速进程",
+        "status.idle": "已降速（闲置）进程",
         "status.power_plan": "当前电源计划",
         "status.timer": "系统计时器精度",
         "status.timer_held": "{value} ms（SpeedyCPU 已提升）",

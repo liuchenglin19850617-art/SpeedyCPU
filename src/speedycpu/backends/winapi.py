@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """Hand written ctypes bindings for the Win32 APIs SpeedyCPU needs.
@@ -450,6 +450,31 @@ def raise_threads(
             raised += 1
             changes.append((tid, current))
     return raised, total, changes
+
+
+def lower_threads(
+    pid: int, priority: int = THREAD_PRIORITY_BELOW_NORMAL
+) -> tuple[int, int, list[tuple[int, int]]]:
+    """Lower every thread of *pid* to at most *priority*.
+
+    Symmetric to :func:`raise_threads` but for throttling idle processes: a
+    thread that is already at or below *priority* is left alone, so calling
+    this is idempotent and never *raises* a thread that was deliberately low.
+    Returns ``(lowered, total, changes)`` where *changes* is a list of
+    ``(thread_id, previous_priority)`` pairs for the threads actually modified.
+    """
+    lowered = 0
+    total = 0
+    changes: list[tuple[int, int]] = []
+    for tid in iter_thread_ids(pid):
+        total += 1
+        current = get_thread_priority(tid)
+        if current is None or current <= priority:
+            continue
+        if set_thread_priority(tid, priority):
+            lowered += 1
+            changes.append((tid, current))
+    return lowered, total, changes
 
 
 def restore_thread_priorities(pid: int, changes: list[tuple[int, int]]) -> int:

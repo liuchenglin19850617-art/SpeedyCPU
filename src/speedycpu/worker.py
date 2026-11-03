@@ -1,14 +1,14 @@
-# SPDX-License-Identifier: LGPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 SpeedyCPU contributors
 #
 # This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU Library General Public License as published by the Free
+# the terms of the GNU General Public License as published by the Free
 # Software Foundation; either version 2 of the License, or (at your option) any
 # later version.
 #
 # This program is distributed in the hope that it will be useful, but WITHOUT
 # ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for more
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
 # details.  You should have received a copy of it in the LICENSE file.
 
 """The background worker behind ``s-cpu on``.
@@ -157,6 +157,16 @@ def read_engine_leftovers(engine_name: str | None, state: dict[str, Any]) -> lis
         except (TypeError, ValueError):
             continue
         records[record.pid] = record
+
+    # Idle (throttled) records are persisted here too, so ``s-cpu off`` after a
+    # crash can still put them back. They are merged under the same PID key; an
+    # active boost record wins over an idle one when both are present.
+    for _key, payload in (state.get("idle") or {}).items():
+        try:
+            record = BoostRecord.from_dict(payload)
+        except (TypeError, ValueError):
+            continue
+        records.setdefault(record.pid, record)
 
     home = cfgmod.home_dir()
 
@@ -310,6 +320,15 @@ class Worker:
         self.state = cfgmod.load_state()
         self.records: dict[int, BoostRecord] = {}
         self.last_check: dict[int, float] = {}
+        # Idle (throttled) processes live in their own map so the worker can
+        # re-apply and revert them independently of the boosted set.
+        self.idle: dict[int, BoostRecord] = {}
+        # PIDs seen at worker start; anything appearing afterwards is a freshly
+        # launched program and earns a launch window in smart mode.
+        self._baseline: set[int] | None = None
+        # PID -> timestamp until which the process is treated as active because
+        # it just launched (smart mode's "allocate more CPU/RAM to start").
+        self._launch_until: dict[int, float] = {}
         self._foreground_pid = 0
         self._running = True
         self._log_file = None
@@ -347,22 +366,62 @@ class Worker:
     def _all_targets(self) -> list[ProcessInfo]:
         return self.backend.list_processes()
 
+    def _desired(self, process: ProcessInfo, now: float) -> tuple[str, bool]:
+        """Decide what *process* should be right now.
+
+        Returns ``(state, launch)`` where *state* is ``"active"``,
+        ``"idle"`` or ``"none"``. In ``smart`` mode a process that first
+        appears after the worker started is granted a short ``"active"`` launch
+        window; everything else not focused / targeted becomes ``"idle"``.
+        Non-smart modes never return ``"idle"``.
+        """
+        reason = self.backend.match_reason(process)
+        if reason is None:
+            return "none", False
+        if reason in ("foreground", "pattern", "all"):
+            return "active", False
+        # reason == "idle" (smart mode only)
+        pid = process.pid
+        if pid not in self._baseline and pid not in self._launch_until:
+            self._launch_until[pid] = now + float(self.config.get("launch_boost_seconds") or 0.0)
+            return "active", True
+        if pid in self._launch_until and now < self._launch_until[pid]:
+            return "active", True
+        return "idle", False
+
     def _scan_once(self) -> tuple[int, int]:
         """One pass over the process list. Returns ``(new, total_managed)``."""
         new_boosts = 0
         me = os.getpid()
+        now = time.time()
+        if self._baseline is None:
+            self._baseline = {p.pid for p in self._all_targets() if p.pid != me and p.pid > 0}
         for process in self._all_targets():
             pid = process.pid
             if pid == me or pid <= 0:
                 continue
+            state, launch = self._desired(process, now)
+            if state == "none":
+                if pid in self.records:
+                    self._release(pid)
+                elif pid in self.idle:
+                    self._unthrottle(pid)
+                continue
+            if state == "active":
+                if pid in self.idle:
+                    self._unthrottle(pid)
+                if pid not in self.records:
+                    reason = "launch" if launch else (self.backend.match_reason(process) or "pattern")
+                    if self._boost(process, reason):
+                        new_boosts += 1
+                continue
+            # state == "idle"
             if pid in self.records:
-                continue
-            reason = self.backend.match_reason(process)
-            if reason is None:
-                continue
-            if self._boost(process, reason):
-                new_boosts += 1
-        return new_boosts, len(self.records)
+                self._release(pid)
+            if pid not in self.idle:
+                if self._throttle(process):
+                    new_boosts += 1
+        return new_boosts, len(self.records) + len(self.idle)
 
     def _boost(self, process: ProcessInfo, reason: str) -> bool:
         started = time.perf_counter()
@@ -396,6 +455,38 @@ class Worker:
             self.log(f"unboost failed for {record.name} ({pid}): {exc!r}")
             return False
 
+    def _throttle(self, process: ProcessInfo) -> bool:
+        """Deprioritise an idle process (smart mode)."""
+        started = time.perf_counter()
+        try:
+            record = self.backend.throttle(process)
+        except Exception as exc:
+            self.log(f"throttle failed for {process.name} ({process.pid}): {exc!r}")
+            return False
+        if record is None:
+            self.log(f"skip throttle {process.name} ({process.pid}): not accessible")
+            return False
+        record.reason = "idle"
+        self.idle[process.pid] = record
+        self.last_check[process.pid] = time.time()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self.log(
+            f"throttled {record.name} ({process.pid}) - priority "
+            f"{record.priority_before} -> {record.priority_after}, memory deprioritised, {elapsed_ms:.0f} ms"
+        )
+        return True
+
+    def _unthrottle(self, pid: int) -> bool:
+        record = self.idle.pop(pid, None)
+        self.last_check.pop(pid, None)
+        if record is None:
+            return False
+        try:
+            return bool(self.backend.unboost(record))
+        except Exception as exc:
+            self.log(f"unthrottle failed for {record.name} ({pid}): {exc!r}")
+            return False
+
     def _tick_foreground(self) -> int:
         """React to focus changes without paying for a full process scan.
 
@@ -403,9 +494,14 @@ class Worker:
         so this can run many times a second. When the user alt-tabs away from a
         process we boosted only because it was focused, the boost is released,
         which is the half of the trick that actually changes who wins.
+
+        In ``smart`` mode the process that lost focus is also demoted to idle
+        (throttled), because the whole point of the mode is to stop background
+        programs competing for resources.
         """
-        if self.backend.mode() != "foreground":
+        if self.backend.mode() not in ("foreground", "smart"):
             return 0
+        smart = self.backend.mode() == "smart"
         pid = self.backend.foreground_pid()
         if pid == self._foreground_pid:
             return 0
@@ -420,19 +516,34 @@ class Worker:
         ):
             changes += 1
             self.log(f"released {previous} (focus moved away)")
+            if smart:
+                process = self.backend.process_info(previous)
+                if process is not None and self.backend.match_reason(process) == "idle":
+                    if self._throttle(process):
+                        changes += 1
 
         if pid and pid not in self.records:
             process = self.backend.process_info(pid)
-            if process is not None and self.backend.match_reason(process) == "foreground" and self._boost(
-                process, "foreground"
-            ):
-                changes += 1
+            reason = self.backend.match_reason(process) if process else None
+            if process is not None and reason in ("foreground", "pattern"):
+                if pid in self.idle:
+                    self._unthrottle(pid)
+                if self._boost(process, reason):
+                    changes += 1
         return changes
 
     def _maintain(self) -> None:
-        """Prune dead processes and re-apply boosts that the OS dropped."""
+        """Prune dead processes and re-apply boosts/throttles the OS dropped."""
         interval = float(self.config.get("reboost_interval") or 20.0)
         now = time.time()
+
+        # Expire finished launch windows. A process still active for another
+        # reason (focused / targeted) is unaffected; one that is now idle will
+        # be throttled by the next _scan_once.
+        for pid in list(self._launch_until):
+            if now >= self._launch_until[pid]:
+                del self._launch_until[pid]
+
         for pid in list(self.records):
             record = self.records[pid]
             if not self.backend.is_alive(pid):
@@ -448,6 +559,20 @@ class Worker:
                 continue
             if fresh is not None:
                 self._merge(record, fresh)
+
+        for pid in list(self.idle):
+            record = self.idle[pid]
+            if not self.backend.is_alive(pid):
+                self.idle.pop(pid, None)
+                self.last_check.pop(pid, None)
+                continue
+            if now - self.last_check.get(pid, 0.0) < interval:
+                continue
+            self.last_check[pid] = now
+            try:
+                self.backend.reapply_throttle(record)
+            except Exception:
+                continue
 
     @staticmethod
     def _merge(original: BoostRecord, fresh: BoostRecord) -> None:
@@ -477,9 +602,11 @@ class Worker:
             return
         self._last_state_write = now
         self.state["boosted"] = {str(pid): record.to_dict() for pid, record in self.records.items()}
+        self.state["idle"] = {str(pid): record.to_dict() for pid, record in self.idle.items()}
         self.state["stats"] = {
             "processes_boosted": len(self.records),
             "threads_raised": sum(record.threads_raised for record in self.records.values()),
+            "processes_idle": len(self.idle),
             "last_scan": cfgmod.utc_timestamp(),
         }
         cfgmod.save_state(self.state)
@@ -493,6 +620,13 @@ class Worker:
             except Exception as exc:
                 self.log(f"unboost failed for {record.name} ({pid}): {exc!r}")
             self.records.pop(pid, None)
+        for pid, record in list(self.idle.items()):
+            try:
+                if self.backend.unboost(record):
+                    reverted += 1
+            except Exception as exc:
+                self.log(f"unthrottle failed for {record.name} ({pid}): {exc!r}")
+            self.idle.pop(pid, None)
         return reverted
 
     # ------------------------------------------------------------------
@@ -565,6 +699,7 @@ class Worker:
                     "enabled": False,
                     "worker_pid": None,
                     "boosted": {},
+                    "idle": {},
                     "timer_ms": None,
                     "last_reverted": reverted,
                 }
